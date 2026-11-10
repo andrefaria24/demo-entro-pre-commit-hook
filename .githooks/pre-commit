@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Entro pre-commit hook: scans every staged file with the Entro CLI and aborts the commit if any exposed secret is found.
+# Requires: entro CLI on PATH, ENTRO_SECURITY_PLATFORM_TOKEN, ENTRO_SECURITY_PLATFORM_URL
+
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+exec 1>&2
+
+if ! command -v entro >/dev/null 2>&1; then
+  echo -e "${RED}❌ Entro CLI not found in PATH. Install it first (see README).${NC}"
+  exit 1
+fi
+
+if [ -z "${ENTRO_SECURITY_PLATFORM_TOKEN:-}" ] || [ -z "${ENTRO_SECURITY_PLATFORM_URL:-}" ]; then
+  echo -e "${RED}❌ ENTRO_SECURITY_PLATFORM_TOKEN and ENTRO_SECURITY_PLATFORM_URL must be set.${NC}"
+  exit 1
+fi
+
+# Only added/copied/modified/renamed files; deleted files can't be scanned.
+file_names=$(git diff --cached --name-only --diff-filter=ACMR)
+if [ -z "$file_names" ]; then
+  echo -e "${YELLOW}⚠️ --- Entro Pre-commit Hook ---${NC}"
+  echo -e "${YELLOW}⚠️ No files staged for commit. Skipping entro scan.${NC}"
+  exit 0
+fi
+
+total_files=$(echo "$file_names" | grep -c .)
+current_file_num=0
+
+echo -e "${BLUE}➡️ --- Entro Pre-commit Hook ---${NC}"
+echo -e "${BLUE}➡️ Scanning ${total_files} staged files for secrets.${NC}"
+echo -e "${BLUE}➡️ Files to be scanned:${NC}"
+echo "$file_names" | sed 's/^/  - /'
+echo -e "${BLUE}-------------------------------${NC}"
+echo -e "${BLUE}➡️ --- Starting Entro Scan ---${NC}"
+
+# Legacy builds: `entro scan <file>`, clean runs print "Exposed Secrets: 0".
+# Newer builds: `entro scan path <file> --fail-on-findings`, which exits non-zero on findings.
+if entro scan --help 2>&1 | grep -q -- '--fail-on-findings'; then
+  scan_mode=modern
+else
+  scan_mode=legacy
+fi
+
+while IFS= read -r line; do
+  current_file_num=$((current_file_num + 1))
+  percentage=$(( (current_file_num * 100) / total_files ))
+  echo -e "${BLUE}🔎 [${percentage}%] Scanning: ${line}${NC}"
+  if [ "$scan_mode" = modern ]; then
+    out=$(entro scan path "$line" --generic --fail-on-findings 2>&1) && continue
+  else
+    out=$(entro scan "$line" --generic 2>&1) || true
+    [[ "$out" == *"Exposed Secrets: 0"* ]] && continue
+  fi
+  echo -e "${RED}--------------------------------------------------${NC}"
+  echo "$out"
+  echo -e "${RED}❌ !!! Exposed Secret Found in: ${line} !!!${NC}"
+  echo -e "${RED}❌ Commit aborted due to exposed secrets.${NC}"
+  exit 1
+done <<< "$file_names"
+
+echo -e "${GREEN}✅ --- Entro Scan Completed: No secrets found ---${NC}"
+echo -e "${GREEN}✅ Commit can proceed.${NC}"
+exit 0
